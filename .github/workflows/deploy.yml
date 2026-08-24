@@ -1,0 +1,53 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: cs-poc-zmijby7puat1wkj99wbs6hr
+  REGION: us-central1
+  SERVICE: transcript-app
+  REPO: transcript-app-repo
+  IMAGE: us-central1-docker.pkg.dev/cs-poc-zmijby7puat1wkj99wbs6hr/transcript-app-repo/transcript-app
+  RUNTIME_SA: transcript-app-run@cs-poc-zmijby7puat1wkj99wbs6hr.iam.gserviceaccount.com
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/698330644884/locations/global/workloadIdentityPools/github-pool/providers/github-provider-transcript
+          service_account: github-deployer@cs-poc-zmijby7puat1wkj99wbs6hr.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push image
+        run: |
+          gcloud builds submit --tag "${IMAGE}:${GITHUB_SHA}" --project "${PROJECT_ID}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --image "${IMAGE}:${GITHUB_SHA}" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --platform managed \
+            --service-account "${RUNTIME_SA}" \
+            --allow-unauthenticated \
+            --no-cpu-throttling \
+            --min-instances=1 \
+            --max-instances=1 \
+            --memory=2Gi \
+            --cpu=2 \
+            --timeout=3600 \
+            --set-secrets="AKASH_API_KEY=akash-api-key:latest" \
+            --set-env-vars="AKASH_BASE_URL=https://api.akashml.com/v1,AKASH_MODEL=openai/gpt-oss-120b"

@@ -1,20 +1,29 @@
 import os
 import json
-import time
 import uuid
-import sqlite3
+import tempfile
 import threading
 import subprocess
 from datetime import datetime, timezone
 
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, Response
 from google.cloud import storage
+from google.cloud import firestore
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.api_core.client_options import ClientOptions
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+AKASH_API_KEY = os.environ.get("AKASH_API_KEY")
+AKASH_BASE_URL = os.environ.get("AKASH_BASE_URL", "https://api.akashml.com/v1")
+AKASH_MODEL = os.environ.get("AKASH_MODEL", "openai/gpt-oss-120b")
 
 PROJECT_ID = "cs-poc-zmijby7puat1wkj99wbs6hr"
 BUCKET_NAME = f"{PROJECT_ID}-audio-uploads"
+GCS_PREFIX = "transcript-app"
 # NOTE: "chirp_2" batch recognition is blocked in us-central1 for this project
 # ("no longer generally available" — likely an allowlist/deprecation quirk of
 # that specific region). europe-west4 supports full BatchRecognize for both
@@ -22,25 +31,22 @@ BUCKET_NAME = f"{PROJECT_ID}-audio-uploads"
 # the whole app runs against europe-west4. Verified empirically 2026-08-24.
 LOCATION = "europe-west4"
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-AUDIO_STORE_DIR = os.path.join(BASE_DIR, "audio_store")
-TRANSCRIPT_DIR = os.path.join(BASE_DIR, "transcripts")
-DB_PATH = os.path.join(BASE_DIR, "history.db")
-SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(AUDIO_STORE_DIR, exist_ok=True)
-os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
+# Cloud Run gives each instance an ephemeral, memory-backed /tmp — used only as
+# scratch space while converting/uploading a file. Nothing under here is relied
+# on to persist: job metadata lives in Firestore, transcripts/kept audio live
+# in GCS, so any instance can serve any request.
+SCRATCH_DIR = os.path.join(tempfile.gettempdir(), "transcript-app")
+os.makedirs(SCRATCH_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma", ".mp4", ".webm"}
 
-# Capability matrix for this GCP project/region (us-central1), verified empirically:
+# Capability matrix for this GCP project/region (europe-west4), verified empirically:
 #   - "chirp"   supports multiple simultaneous language_codes (code-switching, e.g. an
 #     Indian meeting mixing en-IN/hi-IN/mr-IN) but does NOT support denoiser,
 #     profanity_filter, vocabulary boosting (adaptation), or diarization.
 #   - "chirp_2" supports denoiser, profanity_filter, vocabulary boosting and
 #     multi-channel mode, but only ONE language_code at a time in this region.
-#   - Speaker diarization is not available for either model in us-central1.
+#   - Speaker diarization is not available for either model in this region.
 AVAILABLE_MODELS = ["chirp", "chirp_2"]
 AVAILABLE_LANGUAGES = [
     "en-IN", "hi-IN", "mr-IN", "gu-IN", "ta-IN", "te-IN",
@@ -59,23 +65,64 @@ DEFAULT_SETTINGS = {
     "phrase_boost": 10.0,
 }
 
-SETTINGS_LOCK = threading.Lock()
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB
+
+fs_client = firestore.Client(project=PROJECT_ID)
+JOBS_COLLECTION = "jobs"
+CONFIG_DOC = fs_client.collection("config").document("settings")
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+_akash_client = None
+
+
+def get_akash_client():
+    global _akash_client
+    if not AKASH_API_KEY:
+        raise RuntimeError("AKASH_API_KEY is not configured on the server")
+    if _akash_client is None:
+        _akash_client = OpenAI(api_key=AKASH_API_KEY, base_url=AKASH_BASE_URL)
+    return _akash_client
+
+
+ASK_SYSTEM_PROMPT = """You are a transcript Q&A assistant. You will be given one or more \
+transcripts, each split into numbered lines, and a question from the user. \
+Answer using ONLY the information present in the transcripts below — never guess or use \
+outside knowledge. These transcripts may mix Hindi/English (Hinglish); interpret them as-is.
+
+Speaker identity is generally NOT available (no diarization), so unless a line names a \
+person, answer "who says X" questions by pointing to the transcript(s)/line(s) where that \
+content appears rather than inventing a speaker name.
+
+Respond with ONLY a single JSON object, no markdown fences, matching this exact shape:
+{"answer": "<concise answer, 1-4 sentences>", "citations": [{"job_id": "<job id>", "line": <1-based line number>}]}
+
+Include a citation for every line you relied on. If the answer isn't found in the \
+transcripts, say so plainly in "answer" and return an empty "citations" list."""
+
+
+def build_ask_context(transcripts):
+    blocks = []
+    for t in transcripts:
+        header = f'### Transcript "{t["filename"]}" (job_id: {t["job_id"]})'
+        numbered = "\n".join(f"L{i + 1}: {line}" for i, line in enumerate(t["lines"]))
+        blocks.append(f"{header}\n{numbered}")
+    return "\n\n".join(blocks)
 
 
 def load_settings():
-    with SETTINGS_LOCK:
-        if os.path.exists(SETTINGS_PATH):
-            with open(SETTINGS_PATH) as f:
-                saved = json.load(f)
-            merged = {**DEFAULT_SETTINGS, **saved}
-            return merged
-        return dict(DEFAULT_SETTINGS)
+    snap = CONFIG_DOC.get()
+    if snap.exists:
+        return {**DEFAULT_SETTINGS, **snap.to_dict()}
+    return dict(DEFAULT_SETTINGS)
 
 
 def save_settings(settings):
-    with SETTINGS_LOCK:
-        with open(SETTINGS_PATH, "w") as f:
-            json.dump(settings, f, indent=2)
+    CONFIG_DOC.set(settings)
 
 
 def normalize_settings(raw, base=None):
@@ -130,96 +177,88 @@ def normalize_settings(raw, base=None):
 
     return s
 
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB
 
-# In-memory job store for live progress: job_id -> {status, progress, error, transcript, filename}
-JOBS = {}
-JOBS_LOCK = threading.Lock()
+# ---------------------------------------------------------------
+# Firestore-backed job store (source of truth — no in-memory state,
+# so any Cloud Run instance can serve any request)
+# ---------------------------------------------------------------
 
-DB_LOCK = threading.Lock()
-
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with DB_LOCK, get_db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error TEXT,
-                transcript_file TEXT,
-                audio_file TEXT,
-                keep_audio INTEGER DEFAULT 0,
-                settings_json TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT
-            )
-            """
-        )
-        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-        if "settings_json" not in existing_cols:
-            conn.execute("ALTER TABLE jobs ADD COLUMN settings_json TEXT")
+def job_ref(job_id):
+    return fs_client.collection(JOBS_COLLECTION).document(job_id)
 
 
 def db_insert_job(job_id, filename, keep_audio, settings):
-    with DB_LOCK, get_db() as conn:
-        conn.execute(
-            "INSERT INTO jobs (id, filename, status, keep_audio, settings_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, filename, "queued", int(keep_audio), json.dumps(settings), now_iso()),
-        )
+    job_ref(job_id).set({
+        "filename": filename,
+        "status": "queued",
+        "progress": 0,
+        "error": None,
+        "transcript_blob": None,
+        "audio_blob": None,
+        "keep_audio": bool(keep_audio),
+        "settings": settings,
+        "created_at": now_iso(),
+        "completed_at": None,
+    })
 
 
 def db_update_job(job_id, **fields):
     if not fields:
         return
-    cols = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [job_id]
-    with DB_LOCK, get_db() as conn:
-        conn.execute(f"UPDATE jobs SET {cols} WHERE id = ?", values)
+    job_ref(job_id).update(fields)
 
 
 def db_list_jobs(search=None):
-    with DB_LOCK, get_db() as conn:
-        if search:
-            rows = conn.execute(
-                "SELECT * FROM jobs WHERE filename LIKE ? ORDER BY created_at DESC",
-                (f"%{search}%",),
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+    docs = fs_client.collection(JOBS_COLLECTION).order_by(
+        "created_at", direction=firestore.Query.DESCENDING
+    ).stream()
+    rows = [{"id": d.id, **d.to_dict()} for d in docs]
+    if search:
+        needle = search.lower()
+        rows = [r for r in rows if needle in (r.get("filename") or "").lower()]
+    return rows
 
 
 def db_get_job(job_id):
-    with DB_LOCK, get_db() as conn:
-        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        return dict(row) if row else None
+    snap = job_ref(job_id).get()
+    if not snap.exists:
+        return None
+    return {"id": snap.id, **snap.to_dict()}
 
 
 def db_delete_job(job_id):
-    with DB_LOCK, get_db() as conn:
-        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    job_ref(job_id).delete()
 
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+# ---------------------------------------------------------------
+# GCS-backed file storage (transcripts + optionally kept original audio)
+# ---------------------------------------------------------------
+
+def gcs_bucket():
+    return storage.Client(project=PROJECT_ID).bucket(BUCKET_NAME)
 
 
-init_db()
+def gcs_upload_file(local_path, blob_name):
+    blob = gcs_bucket().blob(blob_name)
+    blob.upload_from_filename(local_path)
+    return blob_name
 
 
-def set_job(job_id, **kwargs):
-    with JOBS_LOCK:
-        JOBS[job_id].update(kwargs)
+def gcs_upload_text(text, blob_name):
+    blob = gcs_bucket().blob(blob_name)
+    blob.upload_from_string(text, content_type="text/plain; charset=utf-8")
+    return blob_name
+
+
+def gcs_download_bytes(blob_name):
+    return gcs_bucket().blob(blob_name).download_as_bytes()
+
+
+def gcs_delete(blob_name):
+    try:
+        gcs_bucket().blob(blob_name).delete()
+    except Exception:
+        pass
 
 
 def convert_to_flac(src_path, dst_path):
@@ -228,14 +267,6 @@ def convert_to_flac(src_path, dst_path):
         check=True,
         capture_output=True,
     )
-
-
-def upload_blob(bucket_name, source_file_name, destination_blob_name):
-    storage_client = storage.Client(project=PROJECT_ID)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-    blob.upload_from_filename(source_file_name)
-    return f"gs://{bucket_name}/{destination_blob_name}"
 
 
 def build_recognition_config(settings):
@@ -305,8 +336,7 @@ def transcribe_chirp(gcs_uri, gcs_output_uri, settings):
 
 
 def download_and_parse_result(bucket_name, prefix):
-    storage_client = storage.Client(project=PROJECT_ID)
-    bucket = storage_client.bucket(bucket_name)
+    bucket = storage.Client(project=PROJECT_ID).bucket(bucket_name)
     blobs = list(bucket.list_blobs(prefix=prefix))
 
     full_transcript = ""
@@ -323,72 +353,54 @@ def download_and_parse_result(bucket_name, prefix):
 
 
 def process_job(job_id, upload_path, original_filename, keep_audio, settings):
-    stored_audio_name = None
+    stored_audio_blob = None
     converted_flac = False
     ext = os.path.splitext(upload_path)[1].lower()
     base_name = os.path.splitext(os.path.basename(upload_path))[0]
-    flac_path = upload_path if ext == ".flac" else os.path.join(UPLOAD_DIR, f"{base_name}.flac")
+    flac_path = upload_path if ext == ".flac" else os.path.join(SCRATCH_DIR, f"{base_name}.flac")
 
     try:
-        set_job(job_id, status="converting", progress=10)
-        db_update_job(job_id, status="converting")
+        db_update_job(job_id, status="converting", progress=10)
 
         if ext != ".flac":
             convert_to_flac(upload_path, flac_path)
             converted_flac = True
 
-        set_job(job_id, status="uploading", progress=25)
-        db_update_job(job_id, status="uploading")
-        gcs_blob_name = f"transcript-app/{job_id}/{os.path.basename(flac_path)}"
-        gcs_uri = upload_blob(BUCKET_NAME, flac_path, gcs_blob_name)
+        db_update_job(job_id, status="uploading", progress=25)
+        gcs_blob_name = f"{GCS_PREFIX}/{job_id}/{os.path.basename(flac_path)}"
+        gcs_upload_file(flac_path, gcs_blob_name)
+        gcs_uri = f"gs://{BUCKET_NAME}/{gcs_blob_name}"
 
-        set_job(job_id, status="transcribing", progress=40)
-        db_update_job(job_id, status="transcribing")
-        output_prefix = f"transcript-app/{job_id}/output/"
+        db_update_job(job_id, status="transcribing", progress=40)
+        output_prefix = f"{GCS_PREFIX}/{job_id}/output/"
         gcs_output_uri = f"gs://{BUCKET_NAME}/{output_prefix}"
         transcribe_chirp(gcs_uri, gcs_output_uri, settings)
 
-        set_job(job_id, status="downloading", progress=90)
-        db_update_job(job_id, status="downloading")
+        db_update_job(job_id, status="downloading", progress=90)
         transcript = download_and_parse_result(BUCKET_NAME, output_prefix)
 
-        transcript_file = os.path.join(TRANSCRIPT_DIR, f"{job_id}.txt")
-        with open(transcript_file, "w") as f:
-            f.write(transcript)
+        transcript_blob = f"{GCS_PREFIX}/{job_id}/transcript.txt"
+        gcs_upload_text(transcript, transcript_blob)
 
         if keep_audio:
-            stored_audio_name = f"{job_id}{ext}"
-            stored_audio_path = os.path.join(AUDIO_STORE_DIR, stored_audio_name)
-            os.replace(upload_path, stored_audio_path)
+            stored_audio_blob = f"{GCS_PREFIX}/{job_id}/original{ext}"
+            gcs_upload_file(upload_path, stored_audio_blob)
 
-        set_job(
-            job_id,
-            status="done",
-            progress=100,
-            transcript=transcript,
-            transcript_file=f"{job_id}.txt",
-        )
         db_update_job(
             job_id,
             status="done",
-            transcript_file=f"{job_id}.txt",
-            audio_file=stored_audio_name,
+            progress=100,
+            transcript_blob=transcript_blob,
+            audio_blob=stored_audio_blob,
             completed_at=now_iso(),
         )
     except Exception as e:
-        set_job(job_id, status="error", error=str(e))
         db_update_job(job_id, status="error", error=str(e), completed_at=now_iso())
     finally:
-        if converted_flac:
+        for p in ({flac_path, upload_path} if converted_flac else {upload_path}):
             try:
-                if os.path.exists(flac_path):
-                    os.remove(flac_path)
-            except OSError:
-                pass
-        if not keep_audio:
-            try:
-                if os.path.exists(upload_path):
-                    os.remove(upload_path)
+                if os.path.exists(p):
+                    os.remove(p)
             except OSError:
                 pass
 
@@ -423,17 +435,9 @@ def upload():
 
     job_id = uuid.uuid4().hex[:12]
     saved_name = f"{job_id}{ext}"
-    upload_path = os.path.join(UPLOAD_DIR, saved_name)
+    upload_path = os.path.join(SCRATCH_DIR, saved_name)
     file.save(upload_path)
 
-    with JOBS_LOCK:
-        JOBS[job_id] = {
-            "status": "queued",
-            "progress": 0,
-            "filename": file.filename,
-            "error": None,
-            "transcript": None,
-        }
     db_insert_job(job_id, file.filename, keep_audio, settings)
 
     thread = threading.Thread(
@@ -446,10 +450,6 @@ def upload():
 
 @app.route("/api/status/<job_id>")
 def status(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    if job:
-        return jsonify(job)
     row = db_get_job(job_id)
     if not row:
         return jsonify({"error": "Job not found"}), 404
@@ -459,22 +459,25 @@ def status(job_id):
 @app.route("/api/download/<job_id>")
 def download(job_id):
     row = db_get_job(job_id)
-    if not row or row.get("status") != "done" or not row.get("transcript_file"):
+    if not row or row.get("status") != "done" or not row.get("transcript_blob"):
         return jsonify({"error": "Transcript not ready"}), 404
-    return send_from_directory(
-        TRANSCRIPT_DIR, row["transcript_file"], as_attachment=True,
-        download_name=f"{os.path.splitext(row['filename'])[0]}_transcript.txt",
+    data = gcs_download_bytes(row["transcript_blob"])
+    download_name = f"{os.path.splitext(row['filename'])[0]}_transcript.txt"
+    return Response(
+        data, mimetype="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
 
 
 @app.route("/api/audio/<job_id>")
 def audio(job_id):
     row = db_get_job(job_id)
-    if not row or not row.get("audio_file"):
+    if not row or not row.get("audio_blob"):
         return jsonify({"error": "Audio not stored for this job"}), 404
-    return send_from_directory(
-        AUDIO_STORE_DIR, row["audio_file"], as_attachment=True,
-        download_name=row["filename"],
+    data = gcs_download_bytes(row["audio_blob"])
+    return Response(
+        data, mimetype="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{row["filename"]}"'},
     )
 
 
@@ -564,14 +567,80 @@ def history():
 @app.route("/api/transcript/<job_id>")
 def transcript_text(job_id):
     row = db_get_job(job_id)
-    if not row or row.get("status") != "done" or not row.get("transcript_file"):
+    if not row or row.get("status") != "done" or not row.get("transcript_blob"):
         return jsonify({"error": "Transcript not available"}), 404
-    path = os.path.join(TRANSCRIPT_DIR, row["transcript_file"])
-    if not os.path.exists(path):
-        return jsonify({"error": "Transcript file missing"}), 404
-    with open(path) as f:
-        text = f.read()
+    text = gcs_download_bytes(row["transcript_blob"]).decode("utf-8")
     return jsonify({"transcript": text, "filename": row["filename"]})
+
+
+@app.route("/api/ask", methods=["POST"])
+def ask():
+    body = request.get_json(force=True, silent=True) or {}
+    job_ids = body.get("job_ids")
+    question = (body.get("question") or "").strip()
+
+    if not isinstance(job_ids, list) or not job_ids:
+        return jsonify({"error": "job_ids must be a non-empty list"}), 400
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+
+    transcripts = []
+    for job_id in job_ids:
+        row = db_get_job(job_id)
+        if not row or row.get("status") != "done" or not row.get("transcript_blob"):
+            return jsonify({"error": f"Transcript not available for job {job_id}"}), 404
+        text = gcs_download_bytes(row["transcript_blob"]).decode("utf-8")
+        lines = text.split("\n")
+        transcripts.append({"job_id": job_id, "filename": row["filename"], "lines": lines})
+
+    try:
+        client = get_akash_client()
+        completion = client.chat.completions.create(
+            model=AKASH_MODEL,
+            messages=[
+                {"role": "system", "content": ASK_SYSTEM_PROMPT},
+                {"role": "user", "content": f"{build_ask_context(transcripts)}\n\nQuestion: {question}"},
+            ],
+            temperature=0,
+        )
+        raw = completion.choices[0].message.content.strip()
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {e}"}), 502
+
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        answer = parsed.get("answer", "").strip()
+        raw_citations = parsed.get("citations", [])
+        if not isinstance(raw_citations, list):
+            raw_citations = []
+    except (json.JSONDecodeError, AttributeError):
+        answer = raw
+        raw_citations = []
+
+    transcripts_by_id = {t["job_id"]: t for t in transcripts}
+    citations = []
+    for c in raw_citations:
+        if not isinstance(c, dict):
+            continue
+        job_id = c.get("job_id")
+        line_no = c.get("line")
+        t = transcripts_by_id.get(job_id)
+        if not t or not isinstance(line_no, int) or line_no < 1 or line_no > len(t["lines"]):
+            continue
+        citations.append({
+            "job_id": job_id,
+            "filename": t["filename"],
+            "line": line_no,
+            "text": t["lines"][line_no - 1],
+        })
+
+    return jsonify({"answer": answer, "citations": citations})
 
 
 @app.route("/api/job/<job_id>", methods=["DELETE"])
@@ -580,24 +649,16 @@ def delete_job(job_id):
     if not row:
         return jsonify({"error": "Job not found"}), 404
 
-    if row.get("transcript_file"):
-        try:
-            os.remove(os.path.join(TRANSCRIPT_DIR, row["transcript_file"]))
-        except OSError:
-            pass
-    if row.get("audio_file"):
-        try:
-            os.remove(os.path.join(AUDIO_STORE_DIR, row["audio_file"]))
-        except OSError:
-            pass
+    if row.get("transcript_blob"):
+        gcs_delete(row["transcript_blob"])
+    if row.get("audio_blob"):
+        gcs_delete(row["audio_blob"])
 
     db_delete_job(job_id)
-    with JOBS_LOCK:
-        JOBS.pop(job_id, None)
-
     return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG") == "1"
-    app.run(host="127.0.0.1", port=5050, debug=debug, threaded=True)
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)

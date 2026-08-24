@@ -8,5 +8,6 @@ history.db
 settings.json
 server.log
 test_clip.m4a
-.DS_Store
-.env
+.git/
+.github/
+deploy/

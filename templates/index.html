@@ -406,6 +406,91 @@
     color: var(--text-faint);
     margin-top: 4px;
   }
+
+  /* Ask AI tab */
+  .ask-transcript-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .ask-transcript-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .ask-transcript-item:hover { background: var(--panel-alt); }
+  .ask-transcript-item input { accent-color: var(--accent); }
+  .chat-box {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 440px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .chat-msg {
+    max-width: 88%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .chat-msg.user { align-self: flex-end; background: var(--accent); color: white; }
+  .chat-msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .chat-msg.error { align-self: flex-start; background: #7f1d1d22; border: 1px solid #7f1d1d55; color: #f87171; }
+  .citations {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .citation-chip {
+    font-size: 0.74rem;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text-dim);
+    cursor: pointer;
+    display: inline-block;
+    width: fit-content;
+  }
+  .citation-chip:hover { border-color: var(--accent); color: var(--text); }
+  .citation-snippet {
+    margin-top: 4px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    background: #0d0f15;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: none;
+    white-space: pre-wrap;
+  }
+  .citation-snippet.open { display: block; }
+  .ask-input-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .ask-input-row input {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 0.88rem;
+  }
+  .ask-input-row input:focus { outline: none; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -418,6 +503,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="new">New</div>
     <div class="tab" data-tab="history">History</div>
+    <div class="tab" data-tab="ask">Ask AI</div>
     <div class="tab" data-tab="settings">Settings</div>
   </div>
 
@@ -459,6 +545,26 @@
       <button class="btn secondary" id="refreshHistory">Refresh</button>
     </div>
     <div class="history-list" id="historyList"></div>
+  </div>
+
+  <div class="tab-panel" id="panel-ask">
+    <div class="settings-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <label style="font-size:0.82rem;font-weight:600;">Ask about</label>
+        <button class="btn secondary" id="askRefreshBtn" style="padding:4px 10px;font-size:0.76rem;">Refresh list</button>
+      </div>
+      <div class="ask-transcript-list" id="askTranscriptList"><div class="empty-state">Loading…</div></div>
+      <p class="help-text" style="margin-top:8px;">Select one or more finished transcripts, then ask a question — e.g. "who says order customer denge?"</p>
+    </div>
+
+    <div class="chat-box" id="chatBox">
+      <div class="empty-state" id="chatEmpty">No questions asked yet.</div>
+    </div>
+
+    <div class="ask-input-row">
+      <input type="text" id="askInput" placeholder="Ask a question about the selected transcript(s)…">
+      <button class="btn" id="askSendBtn">Ask</button>
+    </div>
   </div>
 
   <div class="tab-panel" id="panel-settings">
@@ -731,6 +837,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active');
     document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
     if (tab.dataset.tab === 'history') loadHistory();
+    if (tab.dataset.tab === 'ask') loadAskTranscripts();
   });
 });
 
@@ -906,15 +1013,15 @@ function buildHistoryItem(row) {
   const badgeClass = row.status === 'done' ? 'done' : (row.status === 'error' ? 'error' : 'progress');
 
   let settingsSummary = '';
-  if (row.settings_json) {
-    try { settingsSummary = ' · ' + summarizeSettings(JSON.parse(row.settings_json)); } catch (e) {}
+  if (row.settings) {
+    try { settingsSummary = ' · ' + summarizeSettings(row.settings); } catch (e) {}
   }
 
   el.innerHTML = `
     <div class="history-header">
       <div>
         <div class="history-name">${escapeHtml(row.filename)}</div>
-        <div class="history-meta">${date}${row.audio_file ? ' · audio stored' : ''}${escapeHtml(settingsSummary)}</div>
+        <div class="history-meta">${date}${row.audio_blob ? ' · audio stored' : ''}${escapeHtml(settingsSummary)}</div>
       </div>
       <div class="badge ${badgeClass}">${row.status}</div>
     </div>
@@ -955,7 +1062,7 @@ function buildHistoryItem(row) {
     actions.appendChild(viewBtn);
     actions.appendChild(downloadBtn);
 
-    if (row.audio_file) {
+    if (row.audio_blob) {
       const audioBtn = document.createElement('a');
       audioBtn.className = 'btn secondary';
       audioBtn.href = `/api/audio/${row.id}`;
@@ -983,6 +1090,125 @@ function buildHistoryItem(row) {
   el.appendChild(actions);
   return el;
 }
+
+// ---------------------------------------------------------------
+// Ask AI tab
+// ---------------------------------------------------------------
+const askSelected = new Set();
+
+function loadAskTranscripts() {
+  const list = document.getElementById('askTranscriptList');
+  fetch('/api/history')
+    .then(res => res.json())
+    .then(rows => {
+      const done = rows.filter(r => r.status === 'done');
+      // Drop selections for transcripts that no longer exist.
+      Array.from(askSelected).forEach(id => {
+        if (!done.some(r => r.id === id)) askSelected.delete(id);
+      });
+      if (!done.length) {
+        list.innerHTML = '<div class="empty-state">No completed transcripts yet.</div>';
+        return;
+      }
+      list.innerHTML = '';
+      done.forEach(row => {
+        const date = new Date(row.created_at).toLocaleString();
+        const item = document.createElement('label');
+        item.className = 'ask-transcript-item';
+        item.innerHTML = `
+          <input type="checkbox">
+          <span>${escapeHtml(row.filename)} <span style="color:var(--text-faint);">· ${date}</span></span>
+        `;
+        const cb = item.querySelector('input');
+        cb.checked = askSelected.has(row.id);
+        cb.addEventListener('change', () => {
+          if (cb.checked) askSelected.add(row.id); else askSelected.delete(row.id);
+        });
+        list.appendChild(item);
+      });
+    })
+    .catch(() => {
+      list.innerHTML = '<div class="empty-state">Failed to load transcripts.</div>';
+    });
+}
+
+document.getElementById('askRefreshBtn').addEventListener('click', loadAskTranscripts);
+
+function appendChatMsg(role, content) {
+  const emptyEl = document.getElementById('chatEmpty');
+  if (emptyEl) emptyEl.remove();
+  const box = document.getElementById('chatBox');
+  const el = document.createElement('div');
+  el.className = 'chat-msg ' + role;
+  el.textContent = content;
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+  return el;
+}
+
+function renderCitations(container, citations) {
+  if (!citations || !citations.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'citations';
+  citations.forEach(c => {
+    const holder = document.createElement('div');
+    const chip = document.createElement('span');
+    chip.className = 'citation-chip';
+    chip.textContent = `${c.filename} · line ${c.line}`;
+    const snippet = document.createElement('div');
+    snippet.className = 'citation-snippet';
+    snippet.textContent = c.text;
+    chip.addEventListener('click', () => snippet.classList.toggle('open'));
+    holder.appendChild(chip);
+    holder.appendChild(snippet);
+    wrap.appendChild(holder);
+  });
+  container.appendChild(wrap);
+}
+
+function sendAskQuestion() {
+  const input = document.getElementById('askInput');
+  const question = input.value.trim();
+  if (!question) return;
+
+  if (!askSelected.size) {
+    appendChatMsg('error', 'Select at least one transcript above first.');
+    return;
+  }
+
+  appendChatMsg('user', question);
+  input.value = '';
+  const pending = appendChatMsg('assistant', 'Thinking…');
+
+  fetch('/api/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: Array.from(askSelected), question }),
+  })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok || data.error) {
+        pending.className = 'chat-msg error';
+        pending.textContent = (data && data.error) || 'Something went wrong.';
+        return;
+      }
+      pending.className = 'chat-msg assistant';
+      pending.textContent = data.answer || '(No answer)';
+      renderCitations(pending, data.citations);
+    })
+    .catch(err => {
+      pending.className = 'chat-msg error';
+      pending.textContent = err.message;
+    })
+    .finally(() => {
+      document.getElementById('chatBox').scrollTop = document.getElementById('chatBox').scrollHeight;
+    });
+}
+
+document.getElementById('askSendBtn').addEventListener('click', sendAskQuestion);
+document.getElementById('askInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendAskQuestion();
+});
 
 // ---------------------------------------------------------------
 // Init

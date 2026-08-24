@@ -1,4 +1,7 @@
 flask
 google-cloud-storage
 google-cloud-speech
+google-cloud-firestore
 gunicorn
+openai
+python-dotenv

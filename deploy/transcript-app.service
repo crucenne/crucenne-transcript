@@ -1,0 +1,15 @@
+[Unit]
+Description=Chirp Transcriber (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=transcript
+WorkingDirectory=/opt/transcript-app
+ExecStart=/opt/transcript-app/venv/bin/gunicorn -w 1 --threads 8 -b 127.0.0.1:8080 --timeout 7200 app:app
+Restart=always
+RestartSec=5
+Environment=HOME=/opt/transcript-app
+
+[Install]
+WantedBy=multi-user.target

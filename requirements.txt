@@ -1,0 +1,4 @@
+flask
+google-cloud-storage
+google-cloud-speech
+gunicorn

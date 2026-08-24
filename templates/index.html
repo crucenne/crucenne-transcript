@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chirp Transcriber</title>
+<style>
+  :root {
+    --bg: #0b0d13;
+    --panel: #171a23;
+    --panel-alt: #1c202c;
+    --border: #2a2e3a;
+    --accent: #6366f1;
+    --accent-hover: #7c7ff0;
+    --accent-dim: #4338ca33;
+    --text: #e5e7eb;
+    --text-dim: #9ca3af;
+    --text-faint: #6b7280;
+    --success: #22c55e;
+    --error: #ef4444;
+    --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: radial-gradient(circle at top, #141824, var(--bg) 60%);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 32px 24px 64px;
+  }
+  .container {
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  header h1 {
+    font-size: 1.7rem;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .subtitle {
+    color: var(--text-dim);
+    margin: 0 0 24px;
+    font-size: 0.95rem;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px;
+    margin-bottom: 22px;
+    width: fit-content;
+  }
+  .tab {
+    padding: 8px 18px;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab.active {
+    background: var(--accent);
+    color: white;
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 14px;
+    background: var(--panel);
+    padding: 44px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--panel-alt);
+  }
+  .dropzone p {
+    margin: 8px 0 0;
+    color: var(--text-dim);
+  }
+  .dropzone .icon { font-size: 2.4rem; }
+  .dropzone .browse { color: var(--accent); text-decoration: underline; }
+  input[type=file] { display: none; }
+
+  .options-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .options-row label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .switch {
+    position: relative;
+    width: 38px;
+    height: 21px;
+    flex-shrink: 0;
+  }
+  .switch input { display: none; }
+  .switch .slider {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 999px;
+    transition: background 0.15s;
+  }
+  .switch .slider::before {
+    content: "";
+    position: absolute;
+    width: 15px;
+    height: 15px;
+    left: 3px;
+    top: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.15s;
+  }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(17px); }
+  .switch input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
+
+  .job-list, .history-list {
+    margin-top: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .job, .history-item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .job-header, .history-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    cursor: default;
+  }
+  .job-name, .history-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .history-meta {
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin-top: 3px;
+  }
+  .badge {
+    font-size: 0.72rem;
+    padding: 3px 9px;
+    border-radius: 999px;
+    text-transform: capitalize;
+    white-space: nowrap;
+    background: var(--panel-alt);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .badge.done { color: var(--success); border-color: #16653433; background: #16653422; }
+  .badge.error { color: var(--error); border-color: #7f1d1d33; background: #7f1d1d22; }
+  .badge.progress { color: var(--warn); border-color: #78350f33; background: #78350f22; }
+
+  .progress-bar {
+    height: 6px;
+    background: var(--border);
+    border-radius: 4px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+
+  .transcript-box {
+    margin-top: 12px;
+    background: #0d0f15;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 240px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--text);
+    display: none;
+  }
+  .transcript-box.open { display: block; }
+
+  .actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 7px 13px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .btn.secondary:hover { border-color: var(--accent); color: var(--text); }
+  .btn.danger { background: transparent; border: 1px solid #7f1d1d55; color: #f87171; }
+  .btn.danger:hover { background: #7f1d1d22; }
+
+  .error-msg {
+    color: var(--error);
+    font-size: 0.85rem;
+    margin-top: 8px;
+  }
+
+  .search-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .search-row input {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 0.88rem;
+  }
+  .search-row input:focus { outline: none; border-color: var(--accent); }
+
+  .empty-state {
+    text-align: center;
+    color: var(--text-faint);
+    padding: 40px 0;
+    font-size: 0.9rem;
+  }
+
+  /* Settings form (shared by New-tab advanced panel + Settings tab) */
+  .settings-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 18px 20px;
+  }
+  .preset-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .preset-row select, select.select-input {
+    flex: 1;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 10px;
+    color: var(--text);
+    font-size: 0.85rem;
+  }
+  .advanced-toggle {
+    color: var(--accent);
+    font-size: 0.83rem;
+    cursor: pointer;
+    user-select: none;
+    display: inline-block;
+    margin-top: 6px;
+  }
+  .advanced-panel { display: none; margin-top: 14px; }
+  .advanced-panel.open { display: block; }
+
+  .field-group { margin-bottom: 16px; }
+  .field-group:last-child { margin-bottom: 0; }
+  .field-group > label, .field-row > .field-label {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .help-text {
+    font-size: 0.76rem;
+    color: var(--text-faint);
+    margin: 4px 0 0;
+    line-height: 1.4;
+  }
+  .chip-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip {
+    font-size: 0.78rem;
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+  }
+  .chip.selected {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  select.select-input {
+    width: 100%;
+  }
+  .field-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .field-row:first-of-type { border-top: none; padding-top: 0; }
+  .field-row.disabled { opacity: 0.45; }
+  .switch-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .num-input {
+    width: 64px;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 7px;
+    color: var(--text);
+    font-size: 0.82rem;
+  }
+  textarea.text-input {
+    width: 100%;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 10px;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: inherit;
+    resize: vertical;
+  }
+  .boost-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  .save-row {
+    margin-top: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .save-msg {
+    font-size: 0.8rem;
+    color: var(--success);
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .save-msg.show { opacity: 1; }
+  .settings-summary {
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🎙️ Chirp Transcriber</h1>
+    <p class="subtitle">Drop an audio file to transcribe it with Google Cloud Chirp — tune the model per recording condition (meeting room, phone call, noisy/mixed audio) in Settings.</p>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="new">New</div>
+    <div class="tab" data-tab="history">History</div>
+    <div class="tab" data-tab="settings">Settings</div>
+  </div>
+
+  <div class="tab-panel active" id="panel-new">
+    <div class="dropzone" id="dropzone">
+      <div class="icon">⬆️</div>
+      <p><strong>Drag & drop</strong> an audio file here, or <span class="browse">browse</span></p>
+      <p style="font-size:0.8rem;margin-top:6px;">.mp3, .wav, .m4a, .flac, .ogg, .aac, .mp4, .webm</p>
+      <input type="file" id="fileInput" accept=".mp3,.wav,.m4a,.flac,.ogg,.aac,.wma,.mp4,.webm">
+    </div>
+
+    <div class="options-row">
+      <label for="keepAudioToggle">
+        <span class="switch">
+          <input type="checkbox" id="keepAudioToggle">
+          <span class="slider"></span>
+        </span>
+        Keep original audio file in storage after transcribing
+      </label>
+    </div>
+
+    <div class="settings-card" style="margin-top:14px;">
+      <div class="preset-row">
+        <select id="presetSelect" class="select-input">
+          <option value="">Use default settings (see Settings tab)</option>
+        </select>
+      </div>
+      <div class="settings-summary" id="newSummary"></div>
+      <span class="advanced-toggle" id="advancedToggle">Advanced options ▾</span>
+      <div class="advanced-panel" id="advancedPanel"></div>
+    </div>
+
+    <div class="job-list" id="jobList"></div>
+  </div>
+
+  <div class="tab-panel" id="panel-history">
+    <div class="search-row">
+      <input type="text" id="historySearch" placeholder="Search by filename…">
+      <button class="btn secondary" id="refreshHistory">Refresh</button>
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
+  <div class="tab-panel" id="panel-settings">
+    <p class="help-text" style="margin-bottom:14px;">These are the default settings applied to every new upload unless overridden per file on the New tab.</p>
+    <div class="settings-card">
+      <div id="defaultsPanel"></div>
+      <div class="save-row">
+        <button class="btn" id="saveDefaultsBtn">Save as default</button>
+        <span class="save-msg" id="saveMsg">Saved ✓</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------
+// Config / settings form engine (shared by New-tab and Settings tab)
+// ---------------------------------------------------------------
+let CONFIG = { models: [], languages: [], capabilities: {}, presets: {} };
+let DEFAULT_SETTINGS = null;
+
+const MODEL_LABELS = {
+  chirp: 'Chirp — multi-language (code-switching)',
+  chirp_2: 'Chirp 2 — single language, higher quality',
+};
+
+function fetchConfigAndSettings() {
+  return Promise.all([
+    fetch('/api/config').then(r => r.json()),
+    fetch('/api/settings').then(r => r.json()),
+  ]).then(([config, settings]) => {
+    CONFIG = config;
+    DEFAULT_SETTINGS = settings;
+    populatePresetSelect();
+    buildSettingsForm(document.getElementById('advancedPanel'), settings, { compact: true });
+    buildSettingsForm(document.getElementById('defaultsPanel'), settings, { compact: false });
+    updateNewSummary();
+  });
+}
+
+function populatePresetSelect() {
+  const sel = document.getElementById('presetSelect');
+  Object.entries(CONFIG.presets).forEach(([key, preset]) => {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = preset.label;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => {
+    if (!sel.value) {
+      buildSettingsForm(document.getElementById('advancedPanel'), DEFAULT_SETTINGS, { compact: true });
+    } else {
+      const merged = { ...DEFAULT_SETTINGS, ...CONFIG.presets[sel.value].settings };
+      buildSettingsForm(document.getElementById('advancedPanel'), merged, { compact: true });
+    }
+    updateNewSummary();
+  });
+}
+
+function buildSettingsForm(root, settings, opts) {
+  opts = opts || {};
+  root.innerHTML = '';
+  root.dataset.built = '1';
+
+  // Model
+  const modelGroup = document.createElement('div');
+  modelGroup.className = 'field-group';
+  const modelLabel = document.createElement('label');
+  modelLabel.textContent = 'Model';
+  const modelSelect = document.createElement('select');
+  modelSelect.className = 'select-input f-model';
+  CONFIG.models.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = MODEL_LABELS[m] || m;
+    modelSelect.appendChild(opt);
+  });
+  modelSelect.value = settings.model;
+  const modelHelp = document.createElement('p');
+  modelHelp.className = 'help-text f-model-help';
+  modelGroup.appendChild(modelLabel);
+  modelGroup.appendChild(modelSelect);
+  modelGroup.appendChild(modelHelp);
+  root.appendChild(modelGroup);
+
+  // Languages (multi-select chips) — used by chirp
+  const langMultiGroup = document.createElement('div');
+  langMultiGroup.className = 'field-group f-lang-multi';
+  const langMultiLabel = document.createElement('label');
+  langMultiLabel.textContent = 'Languages spoken (recognized together, for code-switching)';
+  const chipGroup = document.createElement('div');
+  chipGroup.className = 'chip-group f-lang-chips';
+  CONFIG.languages.forEach(lang => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = lang;
+    chip.dataset.lang = lang;
+    if (settings.language_codes.includes(lang)) chip.classList.add('selected');
+    chip.addEventListener('click', () => {
+      chip.classList.toggle('selected');
+      updateNewSummary();
+    });
+    chipGroup.appendChild(chip);
+  });
+  langMultiGroup.appendChild(langMultiLabel);
+  langMultiGroup.appendChild(chipGroup);
+  root.appendChild(langMultiGroup);
+
+  // Language (single-select) — used by chirp_2
+  const langSingleGroup = document.createElement('div');
+  langSingleGroup.className = 'field-group f-lang-single';
+  const langSingleLabel = document.createElement('label');
+  langSingleLabel.textContent = 'Language';
+  const langSelect = document.createElement('select');
+  langSelect.className = 'select-input f-lang-single-select';
+  CONFIG.languages.forEach(lang => {
+    const opt = document.createElement('option');
+    opt.value = lang;
+    opt.textContent = lang;
+    langSelect.appendChild(opt);
+  });
+  langSelect.value = settings.language_codes[0] || CONFIG.languages[0];
+  langSingleGroup.appendChild(langSingleLabel);
+  langSingleGroup.appendChild(langSelect);
+  root.appendChild(langSingleGroup);
+
+  // Punctuation
+  root.appendChild(makeToggleRow('f-punctuation', 'Automatic punctuation', settings.punctuation, false));
+
+  // chirp_2-only features
+  root.appendChild(makeToggleRow('f-profanity', 'Filter profanity', settings.profanity_filter, true));
+
+  const denoiseRow = document.createElement('div');
+  denoiseRow.className = 'field-row f-chirp2-only';
+  denoiseRow.innerHTML = `
+    <label class="switch-label">
+      <span class="switch"><input type="checkbox" class="f-denoise"></span>
+      Reduce background noise (denoiser) — for noisy/mixed recordings
+    </label>
+    <span style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-faint);">
+      SNR <input type="number" class="num-input f-snr" min="0" max="30" step="1">
+    </span>
+  `;
+  root.appendChild(denoiseRow);
+  denoiseRow.querySelector('.f-denoise').checked = !!settings.denoise;
+  denoiseRow.querySelector('.f-snr').value = settings.snr_threshold;
+
+  root.appendChild(makeToggleRow('f-multichannel', 'Separate recognition per channel (stereo / dual-mic setup)', settings.multi_channel, true));
+
+  const phraseGroup = document.createElement('div');
+  phraseGroup.className = 'field-group f-chirp2-only';
+  phraseGroup.style.paddingTop = '12px';
+  phraseGroup.innerHTML = `
+    <label>Custom vocabulary (boosts recognition of names/jargon)</label>
+    <textarea class="text-input f-phrases" rows="2" placeholder="e.g. Lubrall, soft starter, GST, dispatch"></textarea>
+    <div class="boost-row">
+      Boost strength
+      <input type="number" class="num-input f-boost" min="0" max="20" step="1">
+    </div>
+  `;
+  root.appendChild(phraseGroup);
+  phraseGroup.querySelector('.f-phrases').value = (settings.phrase_hints || []).join(', ');
+  phraseGroup.querySelector('.f-boost').value = settings.phrase_boost;
+
+  function refreshVisibility() {
+    const model = modelSelect.value;
+    const caps = CONFIG.capabilities[model] || {};
+    langMultiGroup.style.display = caps.multi_language ? '' : 'none';
+    langSingleGroup.style.display = caps.multi_language ? 'none' : '';
+    root.querySelectorAll('.f-chirp2-only').forEach(el => {
+      const enabled = !caps.multi_language; // true only for chirp_2-like models
+      el.classList.toggle('disabled', !enabled);
+      el.querySelectorAll('input, textarea').forEach(inp => { inp.disabled = !enabled; });
+    });
+    modelHelp.textContent = model === 'chirp'
+      ? 'Best for meeting-room / mixed-language conversations. Cannot use denoiser, profanity filter, or vocabulary boosting.'
+      : 'Best for a single primary language with noisy audio, or when you need vocabulary boosting / profanity filtering. Only one language at a time.';
+    updateNewSummary();
+  }
+  modelSelect.addEventListener('change', refreshVisibility);
+  refreshVisibility();
+
+  root.querySelectorAll('input, textarea, select').forEach(el => {
+    el.addEventListener('change', updateNewSummary);
+  });
+}
+
+function readSettingsFromForm(root) {
+  const model = root.querySelector('.f-model').value;
+  const caps = CONFIG.capabilities[model] || {};
+  let language_codes;
+  if (caps.multi_language) {
+    language_codes = Array.from(root.querySelectorAll('.f-lang-chips .chip.selected')).map(c => c.dataset.lang);
+    if (!language_codes.length) language_codes = [CONFIG.languages[0]];
+  } else {
+    language_codes = [root.querySelector('.f-lang-single-select').value];
+  }
+  return {
+    model,
+    language_codes,
+    punctuation: root.querySelector('.f-punctuation').checked,
+    profanity_filter: root.querySelector('.f-profanity').checked,
+    denoise: root.querySelector('.f-denoise').checked,
+    snr_threshold: parseFloat(root.querySelector('.f-snr').value) || 0,
+    multi_channel: root.querySelector('.f-multichannel').checked,
+    phrase_hints: root.querySelector('.f-phrases').value.split(',').map(s => s.trim()).filter(Boolean),
+    phrase_boost: parseFloat(root.querySelector('.f-boost').value) || 0,
+  };
+}
+
+function makeToggleRow(cls, label, checked, chirp2Only) {
+  const row = document.createElement('div');
+  row.className = 'field-row' + (chirp2Only ? ' f-chirp2-only' : '');
+  row.innerHTML = `
+    <label class="switch-label">
+      <span class="switch"><input type="checkbox" class="${cls}"></span>
+      ${label}
+    </label>
+  `;
+  row.querySelector('input').checked = !!checked;
+  return row;
+}
+
+function summarizeSettings(s) {
+  const parts = [MODEL_LABELS[s.model] ? s.model : s.model];
+  parts.push(s.language_codes.join('+'));
+  if (s.denoise) parts.push('denoise');
+  if (s.profanity_filter) parts.push('profanity filter');
+  if (s.multi_channel) parts.push('multi-channel');
+  if (s.phrase_hints && s.phrase_hints.length) parts.push(`${s.phrase_hints.length} vocab hint(s)`);
+  return parts.join(' · ');
+}
+
+function updateNewSummary() {
+  const panel = document.getElementById('advancedPanel');
+  if (!panel.dataset.built) return;
+  const s = readSettingsFromForm(panel);
+  document.getElementById('newSummary').textContent = 'Will use: ' + summarizeSettings(s);
+}
+
+document.getElementById('advancedToggle').addEventListener('click', () => {
+  const panel = document.getElementById('advancedPanel');
+  panel.classList.toggle('open');
+  document.getElementById('advancedToggle').textContent = panel.classList.contains('open') ? 'Advanced options ▴' : 'Advanced options ▾';
+});
+
+document.getElementById('saveDefaultsBtn').addEventListener('click', () => {
+  const settings = readSettingsFromForm(document.getElementById('defaultsPanel'));
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  })
+    .then(r => r.json())
+    .then(saved => {
+      DEFAULT_SETTINGS = saved;
+      const msg = document.getElementById('saveMsg');
+      msg.classList.add('show');
+      setTimeout(() => msg.classList.remove('show'), 2000);
+    });
+});
+
+// ---------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'history') loadHistory();
+  });
+});
+
+// ---------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const jobList = document.getElementById('jobList');
+const keepAudioToggle = document.getElementById('keepAudioToggle');
+
+dropzone.addEventListener('click', () => fileInput.click());
+
+['dragenter', 'dragover'].forEach(evt =>
+  dropzone.addEventListener(evt, e => {
+    e.preventDefault();
+    dropzone.classList.add('dragover');
+  })
+);
+['dragleave', 'drop'].forEach(evt =>
+  dropzone.addEventListener(evt, e => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+  })
+);
+dropzone.addEventListener('drop', e => {
+  const files = e.dataTransfer.files;
+  if (files.length) uploadFile(files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) uploadFile(fileInput.files[0]);
+  fileInput.value = '';
+});
+
+function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('keep_audio', keepAudioToggle.checked ? 'true' : 'false');
+  const settings = readSettingsFromForm(document.getElementById('advancedPanel'));
+  formData.append('settings', JSON.stringify(settings));
+
+  const jobEl = createJobCard(file.name, settings);
+
+  fetch('/api/upload', { method: 'POST', body: formData })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) {
+        showError(jobEl, data.error);
+        return;
+      }
+      pollStatus(data.job_id, jobEl);
+    })
+    .catch(err => showError(jobEl, err.message));
+}
+
+function createJobCard(filename, settings) {
+  const el = document.createElement('div');
+  el.className = 'job';
+  el.innerHTML = `
+    <div class="job-header">
+      <div class="job-name">${escapeHtml(filename)}</div>
+      <div class="badge progress">queued</div>
+    </div>
+    <div class="history-meta">${escapeHtml(summarizeSettings(settings))}</div>
+    <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+  `;
+  jobList.prepend(el);
+  return el;
+}
+
+function showError(jobEl, message) {
+  const badge = jobEl.querySelector('.badge');
+  badge.textContent = 'error';
+  badge.className = 'badge error';
+  const msg = document.createElement('div');
+  msg.className = 'error-msg';
+  msg.textContent = message;
+  jobEl.appendChild(msg);
+}
+
+function pollStatus(jobId, jobEl) {
+  const badge = jobEl.querySelector('.badge');
+  const fillEl = jobEl.querySelector('.progress-fill');
+
+  const interval = setInterval(() => {
+    fetch(`/api/status/${jobId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.error && !data.status) {
+          clearInterval(interval);
+          showError(jobEl, data.error);
+          return;
+        }
+        badge.textContent = data.status;
+        badge.className = 'badge progress';
+        fillEl.style.width = (data.progress || 0) + '%';
+
+        if (data.status === 'done') {
+          clearInterval(interval);
+          badge.className = 'badge done';
+          renderTranscript(jobEl, jobId, data.transcript);
+        } else if (data.status === 'error') {
+          clearInterval(interval);
+          badge.className = 'badge error';
+          showError(jobEl, data.error || 'Transcription failed');
+        }
+      })
+      .catch(() => {});
+  }, 2000);
+}
+
+function renderTranscript(jobEl, jobId, transcript) {
+  const box = document.createElement('div');
+  box.className = 'transcript-box open';
+  box.textContent = transcript && transcript.trim() ? transcript : '(No speech detected)';
+  jobEl.appendChild(box);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.innerHTML = `
+    <a class="btn" href="/api/download/${jobId}">Download .txt</a>
+    <button class="btn secondary" data-copy>Copy</button>
+  `;
+  jobEl.appendChild(actions);
+  actions.querySelector('[data-copy]').addEventListener('click', () => {
+    navigator.clipboard.writeText(box.textContent);
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ---------------------------------------------------------------
+// History tab
+// ---------------------------------------------------------------
+const historyList = document.getElementById('historyList');
+const historySearch = document.getElementById('historySearch');
+const refreshHistory = document.getElementById('refreshHistory');
+let historySearchTimer = null;
+
+refreshHistory.addEventListener('click', loadHistory);
+historySearch.addEventListener('input', () => {
+  clearTimeout(historySearchTimer);
+  historySearchTimer = setTimeout(loadHistory, 300);
+});
+
+function loadHistory() {
+  const q = historySearch.value.trim();
+  fetch('/api/history' + (q ? `?q=${encodeURIComponent(q)}` : ''))
+    .then(res => res.json())
+    .then(rows => renderHistory(rows))
+    .catch(() => {
+      historyList.innerHTML = '<div class="empty-state">Failed to load history.</div>';
+    });
+}
+
+function renderHistory(rows) {
+  if (!rows.length) {
+    historyList.innerHTML = '<div class="empty-state">No transcriptions yet.</div>';
+    return;
+  }
+  historyList.innerHTML = '';
+  rows.forEach(row => historyList.appendChild(buildHistoryItem(row)));
+}
+
+function buildHistoryItem(row) {
+  const el = document.createElement('div');
+  el.className = 'history-item';
+  const date = new Date(row.created_at).toLocaleString();
+  const badgeClass = row.status === 'done' ? 'done' : (row.status === 'error' ? 'error' : 'progress');
+
+  let settingsSummary = '';
+  if (row.settings_json) {
+    try { settingsSummary = ' · ' + summarizeSettings(JSON.parse(row.settings_json)); } catch (e) {}
+  }
+
+  el.innerHTML = `
+    <div class="history-header">
+      <div>
+        <div class="history-name">${escapeHtml(row.filename)}</div>
+        <div class="history-meta">${date}${row.audio_file ? ' · audio stored' : ''}${escapeHtml(settingsSummary)}</div>
+      </div>
+      <div class="badge ${badgeClass}">${row.status}</div>
+    </div>
+  `;
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  if (row.status === 'done') {
+    const viewBtn = document.createElement('button');
+    viewBtn.className = 'btn secondary';
+    viewBtn.textContent = 'View';
+    const box = document.createElement('div');
+    box.className = 'transcript-box';
+    viewBtn.addEventListener('click', () => {
+      if (box.classList.contains('open')) {
+        box.classList.remove('open');
+        return;
+      }
+      if (!box.dataset.loaded) {
+        fetch(`/api/transcript/${row.id}`)
+          .then(res => res.json())
+          .then(data => {
+            box.textContent = data.transcript && data.transcript.trim() ? data.transcript : '(No speech detected)';
+            box.dataset.loaded = '1';
+            box.classList.add('open');
+          });
+      } else {
+        box.classList.add('open');
+      }
+    });
+
+    const downloadBtn = document.createElement('a');
+    downloadBtn.className = 'btn';
+    downloadBtn.href = `/api/download/${row.id}`;
+    downloadBtn.textContent = 'Download';
+
+    actions.appendChild(viewBtn);
+    actions.appendChild(downloadBtn);
+
+    if (row.audio_file) {
+      const audioBtn = document.createElement('a');
+      audioBtn.className = 'btn secondary';
+      audioBtn.href = `/api/audio/${row.id}`;
+      audioBtn.textContent = 'Download audio';
+      actions.appendChild(audioBtn);
+    }
+    el.appendChild(box);
+  } else if (row.status === 'error') {
+    const err = document.createElement('div');
+    err.className = 'error-msg';
+    err.textContent = row.error || 'Transcription failed';
+    el.appendChild(err);
+  }
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'btn danger';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', () => {
+    if (!confirm(`Delete transcript for "${row.filename}"? This cannot be undone.`)) return;
+    fetch(`/api/job/${row.id}`, { method: 'DELETE' })
+      .then(() => loadHistory());
+  });
+  actions.appendChild(deleteBtn);
+
+  el.appendChild(actions);
+  return el;
+}
+
+// ---------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------
+fetchConfigAndSettings();
+</script>
+</body>
+</html>
